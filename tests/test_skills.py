@@ -5,12 +5,15 @@ of skills main to also exercise its real locked builder (first run needs network
 """
 
 import importlib.machinery
+import fcntl
 import io
 import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
+import select
+import sys
 import subprocess
 import tempfile
 import unittest
@@ -252,11 +255,16 @@ class SkillsTests(SkillsFixture):
         self.assertEqual(previous, {str(p.relative_to(self.shared)): p.read_bytes()
                                    for p in self.shared.rglob("*") if p.is_file()})
 
-    def test_no_optional_overlays_passes_no_optional_flags(self):
-        self.assert_ok(self.sync())
-        args = json.loads(self.calls.read_text())
-        self.assertNotIn("--overlay", args)
-        self.assertNotIn("--project", args)
+    def test_missing_workspace_overlay_has_no_argument(self):
+        args = SYNC.build_arguments(self.shared, self.output,
+                                    SYNC.discover_layers(self.workspace, self.overlay))
+        self.assertNotIn("--overlay", args, "missing workspace overlay must be omitted")
+
+    def test_project_without_overlay_has_no_argument(self):
+        (self.workspace / "no-overlay").mkdir()
+        args = SYNC.build_arguments(self.shared, self.output,
+                                    SYNC.discover_layers(self.workspace, self.overlay))
+        self.assertNotIn("--project", args, "project without an overlay must be omitted")
 
     def test_fresh_home_clones_main(self):
         shutil.rmtree(self.shared)
@@ -302,6 +310,60 @@ class SkillsTests(SkillsFixture):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(self.git("-C", self.shared, "branch", "--show-current"), "draft")
 
+    def test_detached_head_has_documented_error(self):
+        self.git("-C", self.shared, "checkout", "--detach")
+        result = self.sync()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must be a clean checkout of main", result.stderr)
+        self.assertNotIn("symbolic-ref", result.stderr)
+        self.assertFalse(self.calls.exists())
+
+    def test_retries_worktree_repair_even_when_next_build_fails(self):
+        worktree = self.home / ".agents/worktrees/draft"
+        self.git("-C", self.shared, "worktree", "add", "-b", "draft", worktree)
+        (worktree / "example/SKILL.md").write_text("keep draft")
+        self.assert_ok(self.sync())
+        (worktree / ".git").write_text(f"gitdir: {self.shared}/.git/worktrees/draft\n")
+        result = self.sync(SKILLS_FAIL="1")
+        self.assertNotEqual(result.returncode, 0)
+        target = Path((worktree / ".git").read_text().strip().removeprefix("gitdir: "))
+        self.assertTrue(target.is_dir(), "stale backlink is repaired before the failed build")
+        self.assertEqual(self.git("-C", worktree, "status", "--porcelain"), "M example/SKILL.md")
+
+    def test_sync_lock_blocks_second_sync_without_touching_state(self):
+        self.assert_ok(self.sync())
+        state = self.base.parent
+        before = {str(p.relative_to(state)): p.read_bytes()
+                  for p in state.rglob("*") if p.is_file()}
+        calls = self.calls.read_bytes()
+        runner = 'import runpy,sys; script=sys.argv.pop(1); print("ready", flush=True); runpy.run_path(script, run_name="__main__")'
+        with (state / "sync.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            process = subprocess.Popen(
+                [sys.executable, "-u", "-c", runner, str(SCRIPT), "sync", "--workspace-root", str(self.workspace),
+                 "--workspace-overlay", str(self.overlay)], env=self.env, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            def cleanup():
+                if process.poll() is None:
+                    process.kill()
+                process.communicate()
+            self.addCleanup(cleanup)
+            try:
+                self.assertTrue(select.select([process.stdout], [], [], 5)[0], "second process started")
+                self.assertEqual(process.stdout.readline().strip(), "ready")
+                with self.assertRaises(subprocess.TimeoutExpired, msg="sync must wait for sync.lock"):
+                    process.wait(timeout=0.5)
+                self.assertEqual(self.calls.read_bytes(), calls, "blocked sync did not invoke the builder")
+                self.assertEqual(before, {str(p.relative_to(state)): p.read_bytes()
+                                         for p in state.rglob("*") if p.is_file()},
+                                 "blocked sync changed no clone or generated state")
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+            stdout, stderr = process.communicate(timeout=30)
+            self.assertEqual(process.returncode, 0, stdout + stderr)
+            self.assertIn("PASS: skills sync", stdout)
+
     def test_fast_forward_updates_main_and_network_failure_keeps_current_source(self):
         (self.remote / "example/SKILL.md").write_text("updated")
         self.git("-C", self.remote, "add", "example/SKILL.md")
@@ -339,6 +401,19 @@ class SkillsTests(SkillsFixture):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("unmanaged skills path", result.stderr)
         self.assertFalse(self.calls.exists())
+
+    def test_unmanaged_directory_and_invalid_marker_are_preserved(self):
+        shutil.rmtree(self.shared)
+        self.shared.mkdir()
+        (self.shared / "keep.txt").write_text("unmanaged")
+        for marker in (None, "invalid json", '{"version":1,"fallback":0}'):
+            if marker is not None:
+                (self.shared / SYNC.VIEW_MARKER).write_text(marker)
+            result = self.sync()
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unmanaged skills path", result.stderr)
+            self.assertEqual((self.shared / "keep.txt").read_text(), "unmanaged")
+            self.assertFalse(self.calls.exists())
 
     def test_claude_conflicts_are_refused_before_build_or_migration(self):
         (self.claude / "example").unlink()

@@ -52,7 +52,10 @@ def link(target, path):
 
 
 def update(source):
-    branch = git(source, "symbolic-ref", "--quiet", "--short", "HEAD")
+    try:
+        branch = git(source, "symbolic-ref", "--quiet", "--short", "HEAD")
+    except subprocess.CalledProcessError:
+        branch = ""
     if branch != "main" or git(source, "status", "--porcelain"):
         raise RuntimeError(f"{source} must be a clean checkout of main; work in a worktree")
     try:
@@ -157,7 +160,9 @@ def managed_view(path):
         return False
     try:
         value = json.loads(marker.read_text())
-        return value == {"version": 1, "fallback": False} or value == {"version": 1, "fallback": True}
+        return (isinstance(value, dict) and set(value) == {"version", "fallback"}
+                and type(value["version"]) is int and value["version"] == 1
+                and type(value["fallback"]) is bool)
     except (OSError, ValueError):
         return False
 
@@ -228,6 +233,16 @@ def discover_layers(workspace, overlay, project_overlay=PROJECT_OVERLAY):
     return layers
 
 
+def build_arguments(source, output, layers):
+    args = ["task", "--dir", str(source), "build", "--", "--base", str(source), "--output", str(output)]
+    for project, layer in layers:
+        if project is None:
+            args += ["--overlay", str(layer)]
+        else:
+            args += ["--project", str(project), str(layer)]
+    return args
+
+
 def sync(home, workspace, overlay):
     state = home / ".local/share/skills"
     state.mkdir(parents=True, exist_ok=True)
@@ -255,14 +270,12 @@ def sync(home, workspace, overlay):
             finally:
                 remove(temporary)
         update(source)
-        args = ["task", "--dir", str(source), "build", "--", "--base", str(source), "--output", str(output)]
-        inputs = [source]
-        for project, layer in discover_layers(workspace, overlay):
-            inputs.append(layer)
-            if project is None:
-                args += ["--overlay", str(layer)]
-            else:
-                args += ["--project", str(project), str(layer)]
+        if source == base:
+            # Also repair a hard stop after view publication, even if this build fails.
+            run("git", "-C", base, "worktree", "repair")
+        layers = discover_layers(workspace, overlay)
+        inputs = [source, *(layer for _, layer in layers)]
+        args = build_arguments(source, output, layers)
         try:
             check_claude(claude, output, source, shared, inputs)
             run(*args)

@@ -1,16 +1,34 @@
 # Skills
 
-Run `skills sync` after changing a workspace or project overlay. Start a new agent
-session afterwards so it discovers the current skills. `chezmoi apply` runs the
-same sync after installing the command. A failed sync is reported without failing
-the apply; run it directly to get a nonzero exit status for automation.
+Run `skills sync` after changing a workspace or project overlay. It updates the
+shared clone, calls its builder and publishes a stable directory for the agents.
+`chezmoi apply` runs the same command. A failed sync is reported without failing
+the apply; run the command directly to get a nonzero status for automation.
 
-The command updates the writable clone of
-[wyrd-company/skills](https://github.com/wyrd-company/skills) at
-`~/.local/share/skills/base`, only on a clean `main` and only by fast-forward.
-Uncommitted changes, a different branch or a detached HEAD stop the sync; make
-skill changes in worktrees. A failed pull reports a warning and builds the
-current checkout, allowing a cached installation to work offline.
+## Source and published views
+
+| Path | Purpose |
+| --- | --- |
+| `~/.local/share/skills/base/` | Writable clone of [wyrd-company/skills](https://github.com/wyrd-company/skills), kept on clean `main`; make skill PRs from worktrees of this clone. |
+| `~/.local/share/skills/generated/skills` | Builder-managed output symlink and sibling generation directories; used only to prepare the published copy. |
+| `~/.agents/skills/` | Real directory of copied skill files, read by Codex and Pi. No symlinks within the view. |
+| `~/.claude/skills/<name>` | Per-skill links to the absolute `~/.agents/skills/<name>` path, read by Claude Code. |
+
+The shared view carries `.skills-sync-view`, a marker recording its format
+version and whether it is a fallback. Each successful sync copies the build into
+`~/.agents/.skills.stage-*`, moves the old view aside, renames the stage into
+place and removes the old copy. If the second rename fails, the old view is
+restored. Canonical skill paths stay rooted at `~/.agents/skills` across builds;
+existing sessions can read those paths after the builder removes an obsolete
+generation. Start a new session to refresh the catalogue of skill names and
+descriptions when those change.
+
+Claude's ordinary directory stays in place. Sync only replaces or prunes links
+into the managed roots; Claude-only directories, files and unrelated links are
+left where they are. A private skill with the same name as a published skill is
+refused before the build. The original Claude view is copied once to
+`~/.claude/skills.before-sync` before any migration changes. Later syncs retain
+that backup and preserve private edits in the current directory.
 
 ## Building
 
@@ -21,90 +39,116 @@ The command passes absolute paths to the clone's Taskfile, in this order:
 3. Each `/workspace/*/.skills` directory, ordered by its project path.
 
 Projects without `.skills/` contribute no arguments. A candidate containing
-`.git` (file or directory) or `<folder-name>.git` is a repository clone; it is
-skipped with a warning on stderr. `main/` is a valid skill name and is included.
-The project folder name is the `PROJECT_OVERLAY` constant in the command. Its
-interim value `.skills` awaits the operator's decision on
+`.git` (file or directory) or `<folder-name>.git` is reported on stderr and
+skipped as a repository clone. `main/` is a valid skill name. The project folder
+name is the command's single `PROJECT_OVERLAY` constant. Its interim value
+`.skills` awaits the operator's decision on
 [skills#27](https://github.com/wyrd-company/skills/issues/27); merge is held until
-that decision matches the constant. Merge rules, validation and
-the exact build interface belong to the skills repository's
-[CONTRIBUTING.md](https://github.com/wyrd-company/skills/blob/main/CONTRIBUTING.md#building-overlays-the-interface-for-skills-sync).
-Task, uv and Python 3.11 or newer must be installed. Task and uv are in the
-Brewfile; Python is part of the workspace environment. The first build needs
-network access for `uv sync --frozen`, which writes the ignored `.venv/` inside
-the clone. Prewarm it while online with:
+that decision matches the constant.
+
+Merge rules, validation and the build interface belong to the skills
+repository's [CONTRIBUTING.md](https://github.com/wyrd-company/skills/blob/main/CONTRIBUTING.md#building-overlays-the-interface-for-skills-sync).
+The builder's contract is unchanged; none of the harnesses reads its output.
+Task and uv are in the Brewfile; Python 3.11 or newer is provided by the workspace.
+The first clone needs network, and the first build or a changed `uv.lock` needs
+network unless dependencies are cached. `uv sync --frozen` creates the ignored
+`.venv/` in the writable clone. Prewarm it while online:
 
 ```sh
 task --dir "$HOME/.local/share/skills/base" tools
 ```
 
-The builder checks and publishes `~/.local/share/skills/generated/skills`, a
-managed symlink. Keep that path stable and reserve its parent for the builder's
-lock and generation directories. Failed builds leave the last successful
-output in place. `skills sync` also locks updates and migration for that HOME.
+Only a clean `main` updates, by fast-forward. Uncommitted changes, another branch
+or detached HEAD stop the sync with the clean-main message. A failed pull warns
+and builds the current checkout. `git worktree repair` runs on the source clone
+on every sync, including before a build that fails, so an interrupted migration
+can repair its worktree backlinks on retry.
 
-Codex and Pi discover `~/.agents/skills`, a link through the managed output.
-Claude Code discovers individual links in `~/.claude/skills`, also through that
-output. Claude-only skill folders and unrelated links survive; a Claude-only
-skill with the same name as a built skill is refused so its data is preserved.
-Old managed links to removed skills are pruned. Links never pin a generation.
+`~/.local/share/skills/sync.lock` serializes source updates, building and
+publication for that HOME. A second sync waits for the lock before touching the
+clone or views. The builder also holds its own output lock. Do not remove lock
+files while a sync could be running.
 
-To check a copy in an isolated HOME, override the two discovery paths:
+A build failure leaves an existing managed view byte for byte unchanged. If
+there is no managed view yet, including after a container rebuild that retained
+Claude's links but lost the source and shared view, sync copies the available
+base clone's top-level skill folders directly without calling the builder again.
+The marker records `fallback: true`, Claude's managed links are refreshed,
+stderr reports that the base skills were published unbuilt, and sync still
+exits nonzero. Fix the build error and sync again to replace the fallback with
+the checked, layered build. An ordinary unmarked directory or unrelated symlink
+at `~/.agents/skills` is refused rather than overwritten.
+
+## Migrating an existing installation
+
+Migration happens by applying this revision (`chezmoi update` after the merge);
+never install `skills` or run `skills sync` from a branch while the applied
+chezmoi source still declares the `~/.agents/skills` git-repo external. A rollback
+lasts only until the next apply.
+
+The hook adopts the old real clone at `~/.agents/skills` as
+`~/.local/share/skills/base`, preserving all Git objects, branches and linked
+worktrees. It builds or prepares a base fallback before moving the clone. The
+view replaces the old clone at its original path; Claude's existing absolute
+links already name that path. Worktrees stay where they are and their backlinks
+are repaired. A migrated `.venv` is reinstalled once at the final path because
+console-script shebangs contain the old absolute path. A pending marker retries
+that environment repair after an interrupted migration. The first fallback can
+be published even if Task or uv cannot build.
+
+Migrate while no agent is editing the source. The old clone and new source path
+must be on the same filesystem; a failed cross-filesystem rename leaves the old
+clone in place. If both clone paths exist, sync refuses to choose between them.
+Inspect and reconcile them before retrying. The original clone is retained at
+`base`; `~/.agents/skills.before-sync` is an alias to it after a completed legacy
+migration, and Claude's one-time backup remains available for inspection.
+
+If interrupted, rerun sync from the applied dotfiles revision. A missing view
+with an intact source can be rebuilt or receive a base fallback. A published
+view with stale worktree backlinks is repaired even if the next build fails.
+Never delete `.git/worktrees` or the linked worktrees to recover.
+
+## Rollback
+
+Stop syncs and agents editing the source, then run this as a script. The checks
+stop it from replacing an unrelated path. It retains the generated view for
+inspection and puts the original clone back at its old path:
 
 ```sh
-HOME=/path/to/scratch-home skills sync \
-  --workspace-root /path/to/scratch-workspace \
-  --workspace-overlay /path/to/scratch-overlay
-```
-
-## Moving an existing installation
-
-The first successful sync adopts the real clone previously at `~/.agents/skills`
-as `~/.local/share/skills/base`. It builds before moving anything. The complete
-clone, local branches and Git worktree metadata are retained. Linked worktrees
-stay where they are; `git worktree repair` updates their backlinks, preserving
-uncommitted content. The migrated clone gets one `uv sync --frozen --reinstall`
-to repair absolute console-script paths in `.venv`; a temporary source link keeps
-legacy consumers reading skills until the generated view is ready. Do this when agents using the clone have stopped editing it.
-The two directories must be on the same filesystem; a cross-filesystem rename
-fails safely before moving the clone.
-
-`~/.agents/skills.before-sync` points to the relocated source clone, and
-`~/.claude/skills.before-sync` holds Claude's previous directory or whole-clone
-link. Later syncs retain these backups. If both a new base and a legacy clone
-exist, sync refuses to choose between them; inspect them and reconcile them
-before retrying. Chezmoi's external manager no longer owns either clone path.
-
-To undo a completed legacy migration, stop syncs and agents editing the source,
-then run these commands after checking the backup paths exist. Retain the
-current Claude view for inspection:
-
-```sh
-test -L "$HOME/.agents/skills"
+set -e
+test -d "$HOME/.agents/skills"
+test ! -L "$HOME/.agents/skills"
+test -f "$HOME/.agents/skills/.skills-sync-view"
 test -d "$HOME/.local/share/skills/base/.git"
-test -e "$HOME/.claude/skills.before-sync"
-test ! -e "$HOME/.claude/skills.after-sync"
-rm "$HOME/.agents/skills"
+test ! -e "$HOME/.agents/skills.after-sync"
+test ! -L "$HOME/.agents/skills.after-sync"
+mv "$HOME/.agents/skills" "$HOME/.agents/skills.after-sync"
 mv "$HOME/.local/share/skills/base" "$HOME/.agents/skills"
 git -C "$HOME/.agents/skills" worktree repair
 uv sync --directory "$HOME/.agents/skills" --frozen --reinstall
-mv "$HOME/.claude/skills" "$HOME/.claude/skills.after-sync"
-mv "$HOME/.claude/skills.before-sync" "$HOME/.claude/skills"
-rm "$HOME/.agents/skills.before-sync"
 ```
 
-Run this as a script with `set -e` so a failed check stops recovery. The generated
-output is independent and can stay for inspection. Do not run `skills sync`
-again until ready to migrate again; the next chezmoi apply also attempts it.
+Claude's links now read the restored clone; keep its current directory and any
+private edits there. Prune links to skills introduced only by an overlay:
 
-If interrupted between moving the clone and creating the new shared link,
-`~/.local/share/skills/base` still holds the complete clone. Rerun `skills sync`
-to finish, or restore it to `~/.agents/skills` and run `git worktree repair` before
-restoring Claude's saved view. A failed migration repairs backlinks when it
-restores the clone automatically. Never delete worktrees or `.git/worktrees` as
-part of recovery.
+```sh
+for entry in "$HOME/.claude/skills"/*; do
+    [ -L "$entry" ] || continue
+    case "$(readlink "$entry")" in
+        "$HOME/.agents/skills/"*) [ -f "$entry/SKILL.md" ] || rm "$entry" ;;
+    esac
+done
+```
+
+The original Claude link layout is also in `~/.claude/skills.before-sync`; inspect
+it without replacing private entries in the current directory. The source alias
+`~/.agents/skills.before-sync` can be removed if it still points to the now-moved
+`base`. Keep builder output and `skills.after-sync` until the failure is
+understood. The next apply or direct sync attempts migration again.
 
 ## Verification
+
+Run orchestration fixtures, the real locked builder and guard mutations:
 
 ```sh
 python3 -m unittest discover -s tests -p test_skills.py -v
@@ -113,15 +157,14 @@ SKILLS_TEST_BASE=/absolute/path/to/skills-main \
 python3 tests/mutate_skills.py
 ```
 
-The default tests use a local Git remote and fake Task/uv commands to check discovery,
-updates, migration, backups and apply failure handling. The opt-in real builder
-test clones the specified checkout into a scratch HOME and proves workspace and
-project appends, unchanged base-only output, `.venv` relocation, and last-good
-output after broken links and orphan files. It needs Task, uv, Python and network
-or a warm uv cache. It never changes the running account's skills.
+Fixtures use local Git remotes and fake Task/uv commands. The real builder test
+uses a scratch HOME and checks append order, project headings, base-only byte
+equality, stable canonical paths, and last-good output after validation failures.
+The rebuild regression retains Claude's links, removes source/view state and
+proves an invalid overlay still leaves a base fallback and resolving links.
 
-With the three harnesses installed, list their discovered skills and verify a
-unique appended token at the skill paths, without calling a model:
+With all three harnesses installed, list their discovered skills and verify an
+appended token without calling a model:
 
 ```sh
 python3 tests/prove_skills_harnesses.py \
@@ -129,8 +172,10 @@ python3 tests/prove_skills_harnesses.py \
   --skill standards --token UNIQUE_OVERLAY_TOKEN
 ```
 
-This initializes Claude Code's normal command list, calls Codex's `skills/list`
-API, and uses Pi's installed default resource loader. It checks every built
-skill is listed. Codex and Pi report the skill path; Claude reports user scope,
-so the script checks its configured user skills path. CLI initialization may
-write account state in the selected HOME; use a scratch HOME for branch proof.
+This uses Claude's normal initialization command list, Codex's `skills/list` API
+and Pi's installed default resource loader. All built skills must be listed.
+Claude starts with a temporary `CLAUDE_CONFIG_DIR` whose `skills` symlink points
+to the selected HOME's Claude view; the directory and its startup state are
+deleted afterwards. Codex and Pi use the selected HOME. Prove branch changes
+only in a scratch HOME. Live acceptance follows the merged `chezmoi update` and
+is coordinated with the workspace's update queue.

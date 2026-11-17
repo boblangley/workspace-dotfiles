@@ -518,6 +518,20 @@ class SkillsTests(SkillsFixture):
         self.assertEqual((self.claude / "example/SKILL.md").read_text(), "base skill")
         self.assert_ok(self.sync())
 
+    def test_harness_proof_uses_disposable_claude_config(self):
+        module_spec = importlib.util.spec_from_file_location("skills_proof", REPO / "tests/prove_skills_harnesses.py")
+        proof = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(proof)
+        before = set(self.claude.parent.iterdir())
+        with proof.temporary_claude_config(self.home) as config:
+            self.assertNotEqual(config, self.claude.parent)
+            self.assertEqual((config / "skills").resolve(), self.claude)
+            (config / ".claude.json").write_text("startup state")
+            (config / "sessions").mkdir()
+        self.assertFalse(config.exists(), "temporary Claude startup state is deleted")
+        self.assertEqual(set(self.claude.parent.iterdir()), before)
+        self.assertFalse((self.claude.parent / ".claude.json").exists())
+
     def test_apply_reports_failure_without_failing(self):
         binary = self.home / ".local/bin/skills"
         binary.parent.mkdir(parents=True)

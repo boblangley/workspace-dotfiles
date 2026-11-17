@@ -2,10 +2,11 @@
 """List installed harness skills without model calls; read a token at the skill path.
 
 Run against a synced scratch HOME first. CLI startup writes only inside the
-selected HOME. Claude uses normal discovery; --bare suppresses user skill lists.
+selected HOME except Claude's temporary config directory. Claude uses normal discovery; --bare suppresses user skill lists.
 """
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
@@ -56,6 +57,14 @@ class Protocol:
         self.errors.close()
 
 
+@contextmanager
+def temporary_claude_config(home):
+    with tempfile.TemporaryDirectory(prefix="skills-proof-claude-") as directory:
+        config = Path(directory)
+        (config / "skills").symlink_to(home / ".claude/skills")
+        yield config
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--home", type=Path, required=True)
@@ -65,7 +74,7 @@ def main():
     args = parser.parse_args()
     home, cwd = args.home.resolve(), args.cwd.resolve()
     env = {**os.environ, "HOME": str(home), "CODEX_HOME": str(home / ".codex"),
-           "CLAUDE_CONFIG_DIR": str(home / ".claude"), "PI_CODING_AGENT_DIR": str(home / ".pi/agent"),
+           "PI_CODING_AGENT_DIR": str(home / ".pi/agent"),
            "PI_OFFLINE": "1"}
     env.pop("CLAUDECODE", None)
     (home / ".codex").mkdir(parents=True, exist_ok=True)
@@ -98,21 +107,22 @@ def main():
     finally:
         codex.close()
 
-    claude = Protocol(["claude", "--settings", '{"disableAllHooks":true}', "--print",
-                       "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
-                       "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
-                       "--setting-sources", "user", "--no-session-persistence"], env, cwd)
-    try:
-        claude.send({"type": "control_request", "request_id": "init-proof",
-                     "request": {"subtype": "initialize"}})
-        result = claude.receive(lambda value: value.get("type") == "control_response")
-        commands = result["response"]["response"]["commands"]
-        # Claude's command metadata reports user scope, without a file path.
-        # Its user skill path is the configured ~/.claude/skills directory.
-        record("Claude Code", [command["name"] for command in commands],
-               home / ".claude/skills" / args.skill / "SKILL.md")
-    finally:
-        claude.close()
+    with temporary_claude_config(home) as config:
+        claude = Protocol(["claude", "--settings", '{"disableAllHooks":true}', "--print",
+                           "--input-format", "stream-json", "--output-format", "stream-json", "--verbose",
+                           "--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}',
+                           "--setting-sources", "user", "--no-session-persistence"], {**env, "CLAUDE_CONFIG_DIR": str(config)}, cwd)
+        try:
+            claude.send({"type": "control_request", "request_id": "init-proof",
+                         "request": {"subtype": "initialize"}})
+            result = claude.receive(lambda value: value.get("type") == "control_response")
+            commands = result["response"]["response"]["commands"]
+            # Claude's command metadata reports user scope, without a file path.
+            # Its user skill path is the configured ~/.claude/skills directory.
+            record("Claude Code", [command["name"] for command in commands],
+                   home / ".claude/skills" / args.skill / "SKILL.md")
+        finally:
+            claude.close()
 
     module = Path(shutil.which("pi")).resolve().parents[1] / "core/resource-loader.js"
     javascript = f'''

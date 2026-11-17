@@ -172,6 +172,39 @@ def stage_view(tree, shared, fallback=False):
         raise
 
 
+def install_view(tree, shared, base, claude, legacy, fallback=False):
+    stage = stage_view(tree, shared, fallback=fallback)
+    pending = base.parent / "venv-needs-repair"
+    moved = False
+    try:
+        if legacy:
+            if (shared / ".venv").exists():
+                pending.touch()
+            shared.rename(base)
+            moved = True
+        publish_directory(stage, shared)
+        if pending.exists() and not fallback:
+            run("uv", "sync", "--frozen", "--reinstall", cwd=base)
+            pending.unlink()
+        run("git", "-C", base, "worktree", "repair")
+        claude.parent.mkdir(parents=True, exist_ok=True)
+        claude_stage = stage_claude(claude, shared, base, shared)
+        try:
+            publish_claude(claude_stage, claude)
+        finally:
+            remove(claude_stage)
+        if legacy:
+            link(base, shared.with_name("skills.before-sync"))
+    except BaseException:
+        if moved:
+            remove(shared)
+            base.rename(shared)
+            run("git", "-C", shared, "worktree", "repair")
+        raise
+    finally:
+        remove(stage)
+
+
 def discover_layers(workspace, overlay, project_overlay=PROJECT_OVERLAY):
     """Workspace first, then project paths; repository containers are not layers."""
     def is_overlay(path):
@@ -228,34 +261,18 @@ def sync(home, workspace, overlay):
                 args += ["--overlay", str(layer)]
             else:
                 args += ["--project", str(project), str(layer)]
-        check_claude(claude, output, source, shared, inputs)
-        run(*args)
-        claude.parent.mkdir(parents=True, exist_ok=True)
-        stage = stage_view(output, shared)
-        moved = False
         try:
-            if legacy:
-                shared.rename(base)
-                moved = True
-            publish_directory(stage, shared)
-            if legacy:
-                run("uv", "sync", "--frozen", "--reinstall", cwd=base)
-            run("git", "-C", base, "worktree", "repair")
-            claude_stage = stage_claude(claude, shared, base, shared)
-            try:
-                publish_claude(claude_stage, claude)
-            finally:
-                remove(claude_stage)
-            if legacy:
-                link(base, shared.with_name("skills.before-sync"))
-        except BaseException:
-            if moved:
-                remove(shared)
-                base.rename(shared)
-                run("git", "-C", shared, "worktree", "repair")
+            check_claude(claude, output, source, shared, inputs)
+            run(*args)
+        except (OSError, RuntimeError, subprocess.CalledProcessError):
+            if not managed_view(shared):
+                try:
+                    install_view(source, shared, base, claude, legacy, fallback=True)
+                    print("skills sync: base skills were published unbuilt as a fallback", file=sys.stderr)
+                except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+                    print(f"skills sync: could not publish fallback: {error}", file=sys.stderr)
             raise
-        finally:
-            remove(stage)
+        install_view(output, shared, base, claude, legacy)
         print(f"PASS: skills sync; source {base}; output {output}")
 
 

@@ -30,6 +30,7 @@ args = sys.argv[1:]
 pathlib.Path(os.environ['SKILLS_CALLS']).write_text(json.dumps(args))
 if os.environ.get('SKILLS_FAIL'):
     sys.exit(9)
+(pathlib.Path(args[args.index('--base') + 1]) / '.venv').mkdir(exist_ok=True)
 output = pathlib.Path(args[args.index('--output') + 1])
 output.parent.mkdir(parents=True, exist_ok=True)
 tree = output.parent / 'fixture-generation'
@@ -206,16 +207,50 @@ class SkillsTests(SkillsFixture):
         failed = self.sync(SKILLS_FAIL="1")
         self.assertNotEqual(failed.returncode, 0)
         self.assertNotIn("PASS: skills sync", failed.stdout)
-        self.assertTrue((self.shared / ".git").is_dir())
-        self.assertFalse(self.base.exists())
+        self.assertTrue(SYNC.managed_view(self.shared))
+        self.assertTrue(json.loads((self.shared / SYNC.VIEW_MARKER).read_text())["fallback"])
+        self.assertIn("base skills were published unbuilt", failed.stderr)
         self.assertEqual((self.claude / "example/SKILL.md").read_text(), "base skill")
         self.assert_ok(self.sync())
         generation = os.readlink(self.output)
+        before = {str(p.relative_to(self.shared)): p.read_bytes()
+                  for p in self.shared.rglob("*") if p.is_file()}
+        inode = self.shared.stat().st_ino
         failed = self.sync(SKILLS_FAIL="1")
         self.assertNotEqual(failed.returncode, 0)
         self.assertEqual(os.readlink(self.output), generation)
+        self.assertEqual(self.shared.stat().st_ino, inode)
+        self.assertEqual(before, {str(p.relative_to(self.shared)): p.read_bytes()
+                                  for p in self.shared.rglob("*") if p.is_file()})
         self.assertEqual((self.shared / "example/SKILL.md").read_text(), "built skill")
         self.assertEqual((self.claude / "example/SKILL.md").read_text(), "built skill")
+
+    def test_rebuild_with_task_failure_publishes_base_without_builder_output(self):
+        self.assert_ok(self.sync())
+        shutil.rmtree(self.home / ".agents")
+        shutil.rmtree(self.base.parent)
+        self.shared.parent.mkdir()
+        # The dangling variant models the earlier output-link layout after rebuild.
+        self.shared.symlink_to(self.output)
+        with patch.dict(os.environ, {**self.env, "SKILLS_FAIL": "1"}), \
+                patch.object(SYNC, "URL", str(self.remote)), \
+                patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaises(subprocess.CalledProcessError):
+                SYNC.sync(self.home, self.workspace, self.overlay)
+        self.assertIn("base skills were published unbuilt", stderr.getvalue())
+        self.assertTrue(SYNC.managed_view(self.shared))
+        self.assertTrue(json.loads((self.shared / SYNC.VIEW_MARKER).read_text())["fallback"])
+        self.assertFalse(self.output.exists(), "fallback never calls the builder again")
+        self.assertEqual((self.shared / "example/SKILL.md").read_text(), "base skill")
+        self.assertTrue(all(item.exists() for item in self.claude.iterdir() if item.is_symlink()))
+        previous = {str(p.relative_to(self.shared)): p.read_bytes()
+                    for p in self.shared.rglob("*") if p.is_file()}
+        inode = self.shared.stat().st_ino
+        result = self.sync(SKILLS_FAIL="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(self.shared.stat().st_ino, inode)
+        self.assertEqual(previous, {str(p.relative_to(self.shared)): p.read_bytes()
+                                   for p in self.shared.rglob("*") if p.is_file()})
 
     def test_no_optional_overlays_passes_no_optional_flags(self):
         self.assert_ok(self.sync())
@@ -444,3 +479,20 @@ class RealBuilderTests(SkillsFixture):
                   for skill in self.output.iterdir() if skill.is_dir()
                   for item in skill.rglob("*") if item.is_file()}
         self.assertEqual(actual, expected)
+
+    def test_rebuild_with_invalid_overlay_keeps_persisted_claude_links_working(self):
+        self.assert_ok(self.sync())
+        original = (self.base / "standards/SKILL.md").read_bytes()
+        shutil.rmtree(self.home / ".agents")
+        shutil.rmtree(self.base.parent)
+        (self.overlay / "standards").mkdir(parents=True)
+        (self.overlay / "standards/SKILL.md").write_text("[broken](missing-proof.md)\n")
+        with patch.dict(os.environ, self.env), patch.object(SYNC, "URL", os.environ["SKILLS_TEST_BASE"]):
+            with self.assertRaises(subprocess.CalledProcessError):
+                SYNC.sync(self.home, self.workspace, self.overlay)
+        self.assertTrue(SYNC.managed_view(self.shared))
+        self.assertTrue(json.loads((self.shared / SYNC.VIEW_MARKER).read_text())["fallback"])
+        self.assertEqual((self.shared / "standards/SKILL.md").read_bytes(), original)
+        links = [item for item in self.claude.iterdir() if item.is_symlink()]
+        self.assertGreater(len(links), 0)
+        self.assertTrue(all(item.exists() for item in links))

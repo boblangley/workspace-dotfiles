@@ -436,6 +436,8 @@ class SkillsTests(SkillsFixture):
         local_inode = (private / "local.txt").stat().st_ino
         original_link_inode = (self.claude / "example").lstat().st_ino
         self.assert_ok(self.sync())
+        self.assertEqual(self.claude.stat().st_ino, directory_inode, "Claude directory stays in place")
+        self.assertTrue((private / "local.txt").is_file(), "private file remains available")
         backup_bytes = (self.claude.parent / "skills.before-sync/private/local.txt").read_bytes()
         (private / "local.txt").write_text("edited after first sync")
         self.assert_ok(self.sync(SKILLS_TOKEN="new view"))
@@ -461,6 +463,7 @@ class SkillsTests(SkillsFixture):
         with patch.object(Path, "rename", rename):
             with self.assertRaisesRegex(OSError, "second rename failed"):
                 SYNC.publish_directory(stage, destination)
+        self.assertTrue((destination / "old.txt").is_file(), "old directory restored after rename failure")
         self.assertEqual((destination / "old.txt").read_text(), "retain me")
 
     def test_claude_whole_clone_link_becomes_per_skill_view_with_backup(self):
@@ -573,7 +576,18 @@ class RealBuilderTests(SkillsFixture):
         self.assertEqual((self.claude / "standards/SKILL.md").read_text(), built)
         self.assertEqual(self.git("-C", self.base, "status", "--porcelain"), "")
         self.assertTrue((self.base / ".venv").is_dir())
+        canonical_root = self.shared.resolve()
+        canonical_skill = (self.shared / "standards/SKILL.md").resolve()
+        (self.overlay / "standards/SKILL.md").write_text("Workspace proof token SKILLS_SECOND_PROOF.\n")
         self.assert_ok(self.sync())  # uv environment remains usable after the move.
+        self.assertEqual(self.shared.resolve(), canonical_root)
+        self.assertEqual((self.shared / "standards/SKILL.md").resolve(), canonical_skill)
+        self.assertFalse(any(item.is_symlink() for item in self.shared.rglob("*")))
+        built = canonical_skill.read_text()
+        self.assertIn("SKILLS_SECOND_PROOF", built)
+        self.assertNotIn("SKILLS_WORKSPACE_PROOF", built)
+        before = {str(p.relative_to(self.shared)): p.read_bytes()
+                  for p in self.shared.rglob("*") if p.is_file()}
         console = subprocess.run([str(self.base / ".venv/bin/pymarkdown"), "version"],
                                  env=self.env, capture_output=True, text=True)
         self.assertEqual(console.returncode, 0, console.stderr)
@@ -582,12 +596,16 @@ class RealBuilderTests(SkillsFixture):
         result = self.sync()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(os.readlink(self.output), previous)
+        self.assertEqual(before, {str(p.relative_to(self.shared)): p.read_bytes()
+                                  for p in self.shared.rglob("*") if p.is_file()})
         self.assertEqual((self.shared / "standards/SKILL.md").read_text(), built)
         (self.overlay / "standards/SKILL.md").write_text("Workspace proof token SKILLS_WORKSPACE_PROOF.\n")
         (self.overlay / "standards/orphan.txt").write_text("orphan")
         result = self.sync()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertEqual(os.readlink(self.output), previous)
+        self.assertEqual(before, {str(p.relative_to(self.shared)): p.read_bytes()
+                                  for p in self.shared.rglob("*") if p.is_file()})
         self.assertEqual((self.shared / "standards/SKILL.md").read_text(), built)
 
         # With no optional layers, every published skill file matches the source.

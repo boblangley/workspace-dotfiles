@@ -38,7 +38,7 @@ def remove(path):
 
 
 def link(target, path):
-    """Replace a link atomically, keeping consumers pointed through OUTPUT."""
+    """Replace a link atomically, keeping consumers pointed through the stable shared view."""
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     os.close(fd)

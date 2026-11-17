@@ -75,7 +75,7 @@ the shared header helper is installed by workspace-ansible.
 ## Skills
 
 `skills sync` manages the clean main clone at `~/.local/share/skills/base`, calls
-its build with workspace and project overlays, and links the result for Claude
-Code, Codex and Pi. Chezmoi's post-apply hook runs the same command and reports
+its build with workspace and project overlays, and publishes a real copy for
+Codex and Pi, with Claude Code links into that view. Chezmoi's post-apply hook runs the same command and reports
 failures without failing apply. See [Skills](docs/skills.md), including the safe
 migration of the old `~/.agents/skills` clone and its linked worktrees.

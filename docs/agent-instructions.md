@@ -42,3 +42,10 @@ They generally contain the following sections:
 - Thar be dragons. Common _agentic_ failures _specific to this repository_.
 
 Everything else the agent can discover in standard places in the repo.
+
+## Skills
+
+`skills sync` builds the shared skills with `/skills` and each project's
+`.skills/` overlay. Claude Code, Codex and Pi discover the generated tree through
+their home-directory skills views. See [Skills](skills.md) for the source clone,
+worktrees, updates and migration.

@@ -1,0 +1,253 @@
+#!/usr/bin/env python3
+"""Build shared skills and maintain the harness views. See docs/skills.md."""
+
+import argparse
+import fcntl
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+
+
+URL = "https://github.com/wyrd-company/skills.git"
+# Interim epic ruling; the operator's final folder-name decision gates merge.
+PROJECT_OVERLAY = ".skills"
+
+
+def run(*args, **kwargs):
+    return subprocess.run([str(arg) for arg in args], check=True, **kwargs)
+
+
+def git(source, *args):
+    return run("git", "-C", source, *args, capture_output=True, text=True).stdout.strip()
+
+
+def exists(path):
+    return path.exists() or path.is_symlink()
+
+
+def remove(path):
+    if path.is_symlink() or path.is_file():
+        path.unlink()
+    elif path.exists():
+        shutil.rmtree(path)
+
+
+def link(target, path):
+    """Replace a link atomically, keeping consumers pointed through OUTPUT."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    os.close(fd)
+    temporary = Path(name)
+    try:
+        temporary.unlink()
+        temporary.symlink_to(target)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def update(source):
+    branch = git(source, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch != "main" or git(source, "status", "--porcelain"):
+        raise RuntimeError(f"{source} must be a clean checkout of main; work in a worktree")
+    try:
+        run("git", "-C", source, "pull", "--ff-only", "--quiet")
+    except subprocess.CalledProcessError:
+        print(f"skills sync: could not update {source}; building the current copy", file=sys.stderr)
+
+
+def managed(target, roots):
+    return any(target == root or root in target.parents for root in roots)
+
+
+def check_claude(claude, output, source, shared, inputs):
+    """Refuse ordinary consumer conflicts before the builder publishes output."""
+    if claude.is_symlink():
+        if claude.resolve() not in (source.resolve(), output.resolve()):
+            raise RuntimeError(f"unmanaged skills link: {claude}")
+        return
+    if not claude.exists():
+        return
+    if not claude.is_dir():
+        raise RuntimeError(f"not a skills directory: {claude}")
+    names = {item.name for tree in inputs for item in tree.iterdir()
+             if item.is_dir() and (item / "SKILL.md").is_file()}
+    for name in names:
+        item = claude / name
+        if not exists(item):
+            continue
+        if item.is_symlink():
+            target = Path(os.path.abspath(claude / os.readlink(item)))
+            if managed(target, (shared, source, output)):
+                continue
+        raise RuntimeError(f"Claude-only skill conflicts with built skill: {item}")
+
+
+def stage_claude(claude, output, source, shared):
+    """Keep Claude-only skills, and refuse to overwrite real skill folders."""
+    stage = Path(tempfile.mkdtemp(prefix=".skills.stage-", dir=claude.parent))
+    try:
+        if claude.is_symlink():
+            if claude.resolve() not in (source.resolve(), output.resolve()):
+                raise RuntimeError(f"unmanaged skills link: {claude}")
+        elif claude.exists():
+            if not claude.is_dir():
+                raise RuntimeError(f"not a skills directory: {claude}")
+            shutil.copytree(claude, stage, symlinks=True, dirs_exist_ok=True)
+        roots = (shared, source, output)
+        for item in stage.iterdir():
+            if item.is_symlink():
+                # Resolve relative links against the original directory, not the stage.
+                target = Path(os.path.abspath(claude / os.readlink(item)))
+                if managed(target, roots):
+                    item.unlink()
+        for skill in sorted(output.iterdir()):
+            if not (skill / "SKILL.md").is_file():
+                continue
+            destination = stage / skill.name
+            if exists(destination):
+                raise RuntimeError(f"Claude-only skill conflicts with built skill: {claude / skill.name}")
+            destination.symlink_to(output / skill.name)
+        return stage
+    except BaseException:
+        shutil.rmtree(stage)
+        raise
+
+
+def publish_claude(stage, claude):
+    backup = claude.with_name("skills.before-sync")
+    previous = None
+    if exists(claude):
+        if not exists(backup):
+            previous = backup
+        else:
+            previous = Path(tempfile.mkdtemp(prefix=".skills.previous-", dir=claude.parent))
+            previous.rmdir()
+        claude.rename(previous)
+    try:
+        stage.rename(claude)
+    except BaseException:
+        if previous:
+            previous.rename(claude)
+        raise
+    if previous and previous != backup:
+        remove(previous)
+
+
+def discover_layers(workspace, overlay, project_overlay=PROJECT_OVERLAY):
+    """Workspace first, then project paths; repository containers are not layers."""
+    def is_overlay(path):
+        if not path.is_dir():
+            return False
+        if exists(path / ".git") or exists(path / f"{path.name}.git"):
+            print(f"skills sync: skipping repository clone at {path}", file=sys.stderr)
+            return False
+        return True
+
+    layers = []
+    if is_overlay(overlay):
+        layers.append((None, overlay))
+    if workspace.is_dir():
+        for project in sorted(workspace.iterdir()):
+            candidate = project / project_overlay
+            if project.is_dir() and is_overlay(candidate):
+                layers.append((project, candidate))
+    return layers
+
+
+def sync(home, workspace, overlay):
+    state = home / ".local/share/skills"
+    state.mkdir(parents=True, exist_ok=True)
+    # Serialize clone updates and migration too, beyond the builder's output lock.
+    with (state / "sync.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        base = state / "base"
+        shared = home / ".agents/skills"
+        output = state / "generated/skills"
+        claude = home / ".claude/skills"
+        legacy = shared.is_dir() and not shared.is_symlink()
+        bridge = shared.is_symlink() and os.readlink(shared) == str(base)
+        relocating = legacy or bridge or (not exists(shared) and exists(base))
+        if legacy and exists(base):
+            raise RuntimeError(f"both {base} and legacy {shared} exist; reconcile them before syncing")
+        if exists(shared) and not legacy and not bridge and (not shared.is_symlink() or os.readlink(shared) != str(output)):
+            raise RuntimeError(f"unmanaged skills path: {shared}")
+        source = shared if legacy else base
+        if not exists(source):
+            # Clone into a temporary sibling: failed network access leaves no half clone.
+            temporary = Path(tempfile.mkdtemp(prefix=".clone-", dir=state))
+            try:
+                run("git", "clone", "--branch", "main", URL, temporary)
+                temporary.rename(base)
+            finally:
+                remove(temporary)
+        update(source)
+        if relocating and not legacy:
+            # Resume an interrupted move before doing another potentially slow build.
+            link(base, shared)
+        args = ["task", "--dir", str(source), "build", "--", "--base", str(source), "--output", str(output)]
+        inputs = [source]
+        for project, layer in discover_layers(workspace, overlay):
+            inputs.append(layer)
+            if project is None:
+                args += ["--overlay", str(layer)]
+            else:
+                args += ["--project", str(project), str(layer)]
+        check_claude(claude, output, source, shared, inputs)
+        run(*args)
+        claude.parent.mkdir(parents=True, exist_ok=True)
+        stage = stage_claude(claude, output, source, shared)
+        moved = False
+        try:
+            if legacy:
+                # The complete clone moves, including local refs and .git/worktrees.
+                # Linked worktrees stay at their original paths; repair their backlinks.
+                shared.rename(base)
+                moved = True
+                # Keep legacy consumers reading the source during worktree/env repair.
+                link(base, shared)
+            if relocating:
+                # uv environments contain absolute console-script shebangs. A normal
+                # sync reuses them after a move; reinstall once at the final path.
+                run("uv", "sync", "--frozen", "--reinstall", cwd=base)
+            link(output, shared)
+            if relocating:
+                # Repair after replacing the source bridge: older Git accepts the
+                # old backlinks while that bridge still reaches the relocated .git.
+                run("git", "-C", base, "worktree", "repair")
+            publish_claude(stage, claude)
+            if relocating:
+                link(base, shared.with_name("skills.before-sync"))
+        except BaseException:
+            if moved:
+                if shared.is_symlink():
+                    shared.unlink()
+                base.rename(shared)
+                run("git", "-C", shared, "worktree", "repair")
+            raise
+        finally:
+            remove(stage)
+        print(f"PASS: skills sync; source {base}; output {output}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("command", choices=["sync"])
+    parser.add_argument("--workspace-root", type=Path, default=Path("/workspace"),
+                        help="project parent (default: /workspace)")
+    parser.add_argument("--workspace-overlay", type=Path, default=Path("/skills"),
+                        help="optional workspace overlay (default: /skills)")
+    args = parser.parse_args()
+    try:
+        sync(Path.home(), args.workspace_root.absolute(), args.workspace_overlay.absolute())
+    except (OSError, RuntimeError, subprocess.CalledProcessError) as error:
+        print(f"skills sync: {error}", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

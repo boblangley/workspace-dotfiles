@@ -34,7 +34,7 @@ output = pathlib.Path(args[args.index('--output') + 1])
 output.parent.mkdir(parents=True, exist_ok=True)
 tree = output.parent / 'fixture-generation'
 (tree / 'example').mkdir(parents=True, exist_ok=True)
-(tree / 'example/SKILL.md').write_text('built skill')
+(tree / 'example/SKILL.md').write_text(os.environ.get('SKILLS_TOKEN', 'built skill'))
 if not output.is_symlink():
     output.symlink_to(tree)
 '''
@@ -57,7 +57,7 @@ class SkillsFixture(unittest.TestCase):
         (self.bin / "task").chmod(0o755)
         (self.bin / "uv").write_text(
             '#!/bin/sh\n'
-            '[ "$(readlink "$HOME/.agents/skills")" = "$HOME/.local/share/skills/base" ] || exit 12\n'
+            '[ -f "$HOME/.agents/skills/.skills-sync-view" ] || exit 12\n'
             'printf "%s\\n" "$@" > "$HOME/uv-calls"\n'
             'pwd >> "$HOME/uv-calls"\n'
             'exit ${SKILLS_UV_FAIL:-0}\n'
@@ -157,8 +157,8 @@ class SkillsTests(SkillsFixture):
         (worktree / "example/SKILL.md").write_text("uncommitted draft")
         before = self.git("-C", worktree, "status", "--porcelain")
         self.assert_ok(self.sync())
-        self.assertTrue(self.shared.is_symlink())
-        self.assertEqual(os.readlink(self.shared), str(self.output))
+        self.assertFalse(self.shared.is_symlink())
+        self.assertTrue(SYNC.managed_view(self.shared))
         self.assertTrue((self.base / ".git").is_dir())
         self.assertTrue((self.home / "uv-calls").is_file(), "relocated environment is reinstalled")
         self.assertEqual((self.home / "uv-calls").read_text().splitlines(),
@@ -170,7 +170,7 @@ class SkillsTests(SkillsFixture):
         self.assertEqual(self.git("-C", worktree, "branch", "--show-current"), "draft")
         self.assertEqual((worktree / "example/SKILL.md").read_text(), "uncommitted draft")
         self.assertEqual((self.claude / "private/local.txt").read_text(), "Claude-only content")
-        self.assertEqual(os.readlink(self.claude / "example"), str(self.output / "example"))
+        self.assertEqual(os.readlink(self.claude / "example"), str(self.shared / "example"))
         self.assertFalse((self.claude / "removed").is_symlink())
         self.assertTrue((self.claude.parent / "skills.before-sync/private/local.txt").exists())
         self.assertEqual((self.shared.parent / "skills.before-sync").resolve(), self.base)
@@ -180,7 +180,7 @@ class SkillsTests(SkillsFixture):
                         "worktree backlink points at a valid git directory")
         self.assertEqual(self.git("-C", worktree, "status", "--porcelain"), before)
         # The documented rollback leaves local branches and dirty worktrees usable.
-        self.shared.unlink()
+        shutil.rmtree(self.shared)
         self.base.rename(self.shared)
         self.git("-C", self.shared, "worktree", "repair")
         shutil.rmtree(self.claude)
@@ -189,6 +189,18 @@ class SkillsTests(SkillsFixture):
         self.assertTrue(Path((worktree / ".git").read_text().strip().removeprefix("gitdir: ")).is_dir(),
                         "worktree backlink points at a valid git directory")
         self.assertEqual(self.git("-C", worktree, "status", "--porcelain"), before)
+
+    def test_stable_real_view_survives_generation_change(self):
+        self.assert_ok(self.sync())
+        root = self.shared.resolve()
+        path = (self.shared / "example/SKILL.md").resolve()
+        (self.output / "example/SKILL.md").write_text("old generation")
+        self.assertEqual(path.read_text(), "built skill", "view is an independent copy")
+        self.assert_ok(self.sync(SKILLS_TOKEN="second token"))
+        self.assertEqual(self.shared.resolve(), root)
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.read_text(), "second token")
+        self.assertFalse(any(item.is_symlink() for item in self.shared.rglob("*")))
 
     def test_build_failure_preserves_legacy_install_and_later_published_install(self):
         failed = self.sync(SKILLS_FAIL="1")
@@ -217,7 +229,7 @@ class SkillsTests(SkillsFixture):
             SYNC.sync(self.home, self.workspace, self.overlay)
         self.assertTrue((self.base / ".git").is_dir())
         self.assertEqual(self.git("-C", self.base, "branch", "--show-current"), "main")
-        self.assertTrue(self.shared.is_symlink())
+        self.assertTrue(SYNC.managed_view(self.shared))
 
     def test_failed_clone_leaves_no_partial_checkout_and_can_retry(self):
         shutil.rmtree(self.shared)
@@ -338,9 +350,10 @@ class SkillsTests(SkillsFixture):
         self.base.parent.mkdir(parents=True)
         self.shared.rename(self.base)
         if bridge:
-            self.shared.symlink_to(self.base)
+            self.shared.mkdir()
+            (self.shared / SYNC.VIEW_MARKER).write_text(json.dumps({"version": 1, "fallback": False}))
         self.assert_ok(self.sync())
-        self.assertEqual(os.readlink(self.shared), str(self.output))
+        self.assertTrue(SYNC.managed_view(self.shared))
         self.assertEqual((self.claude / "example/SKILL.md").read_text(), "built skill")
         self.assertEqual(self.git("-C", worktree, "status", "--porcelain"), "M example/SKILL.md")
         self.assertEqual((worktree / "example/SKILL.md").read_text(), "interrupted draft")

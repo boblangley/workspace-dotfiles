@@ -88,35 +88,46 @@ def check_claude(claude, output, source, shared, inputs):
         raise RuntimeError(f"Claude-only skill conflicts with built skill: {item}")
 
 
-def stage_claude(claude, output, source, shared):
-    """Keep Claude-only skills, and refuse to overwrite real skill folders."""
-    stage = Path(tempfile.mkdtemp(prefix=".skills.stage-", dir=claude.parent))
-    try:
-        if claude.is_symlink():
-            if claude.resolve() not in (source.resolve(), output.resolve(), shared.resolve()):
-                raise RuntimeError(f"unmanaged skills link: {claude}")
-        elif claude.exists():
-            if not claude.is_dir():
-                raise RuntimeError(f"not a skills directory: {claude}")
-            shutil.copytree(claude, stage, symlinks=True, dirs_exist_ok=True)
-        roots = (shared, source, output)
-        for item in stage.iterdir():
-            if item.is_symlink():
-                # Resolve relative links against the original directory, not the stage.
-                target = Path(os.path.abspath(claude / os.readlink(item)))
-                if managed(target, roots):
-                    item.unlink()
-        for skill in sorted(output.iterdir()):
-            if not (skill / "SKILL.md").is_file():
-                continue
-            destination = stage / skill.name
-            if exists(destination):
-                raise RuntimeError(f"Claude-only skill conflicts with built skill: {claude / skill.name}")
-            destination.symlink_to(output / skill.name)
-        return stage
-    except BaseException:
-        shutil.rmtree(stage)
-        raise
+def backup_claude(claude):
+    """Copy the original view once; never move or replace Claude-only entries."""
+    backup = claude.with_name("skills.before-sync")
+    if exists(backup) or not exists(claude):
+        return
+    if claude.is_symlink():
+        backup.symlink_to(os.readlink(claude))
+    else:
+        # Stage the one-time backup so an interrupted copy cannot look complete.
+        temporary = Path(tempfile.mkdtemp(prefix=".skills.backup-", dir=claude.parent))
+        try:
+            shutil.copytree(claude, temporary, symlinks=True, dirs_exist_ok=True)
+            temporary.rename(backup)
+        finally:
+            remove(temporary)
+
+
+def refresh_claude(claude, shared, base, output):
+    check_claude(claude, output, base, shared, [shared])
+    backup_claude(claude)
+    claude.parent.mkdir(parents=True, exist_ok=True)
+    if claude.is_symlink() or not claude.exists():
+        # Convert the legacy whole-clone symlink; ordinary directories stay in place.
+        stage = Path(tempfile.mkdtemp(prefix=".skills.stage-", dir=claude.parent))
+        try:
+            stage.chmod(0o755)
+            publish_directory(stage, claude)
+        finally:
+            remove(stage)
+    names = {item.name for item in shared.iterdir() if (item / "SKILL.md").is_file()}
+    for name in sorted(names):
+        destination = claude / name
+        target = shared / name
+        if not destination.is_symlink() or os.readlink(destination) != str(target):
+            link(target, destination)
+    for item in claude.iterdir():
+        if item.is_symlink() and item.name not in names:
+            target = Path(os.path.abspath(claude / os.readlink(item)))
+            if managed(target, (shared, base, output)):
+                item.unlink()
 
 
 def publish_directory(stage, destination, backup=None):
@@ -136,11 +147,6 @@ def publish_directory(stage, destination, backup=None):
         raise
     if previous and previous != backup:
         remove(previous)
-
-
-def publish_claude(stage, claude):
-    backup = claude.with_name("skills.before-sync")
-    publish_directory(stage, claude, backup if not exists(backup) else None)
 
 
 def managed_view(path):
@@ -177,6 +183,7 @@ def install_view(tree, shared, base, claude, legacy, fallback=False):
     pending = base.parent / "venv-needs-repair"
     moved = False
     try:
+        backup_claude(claude)
         if legacy:
             if (shared / ".venv").exists():
                 pending.touch()
@@ -187,12 +194,7 @@ def install_view(tree, shared, base, claude, legacy, fallback=False):
             run("uv", "sync", "--frozen", "--reinstall", cwd=base)
             pending.unlink()
         run("git", "-C", base, "worktree", "repair")
-        claude.parent.mkdir(parents=True, exist_ok=True)
-        claude_stage = stage_claude(claude, shared, base, shared)
-        try:
-            publish_claude(claude_stage, claude)
-        finally:
-            remove(claude_stage)
+        refresh_claude(claude, shared, base, base.parent / "generated/skills")
         if legacy:
             link(base, shared.with_name("skills.before-sync"))
     except BaseException:

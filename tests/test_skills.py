@@ -352,6 +352,42 @@ class SkillsTests(SkillsFixture):
         self.assertTrue((self.shared / ".git").is_dir())
         self.assertEqual((self.claude / "example/SKILL.md").read_text(), "private skill")
 
+    def test_claude_only_entries_and_existing_links_stay_in_place(self):
+        private = self.claude / "private"
+        unrelated = self.claude / "unrelated"
+        unrelated.symlink_to(private)
+        directory_inode = self.claude.stat().st_ino
+        private_inode = private.stat().st_ino
+        local_inode = (private / "local.txt").stat().st_ino
+        original_link_inode = (self.claude / "example").lstat().st_ino
+        self.assert_ok(self.sync())
+        backup_bytes = (self.claude.parent / "skills.before-sync/private/local.txt").read_bytes()
+        (private / "local.txt").write_text("edited after first sync")
+        self.assert_ok(self.sync(SKILLS_TOKEN="new view"))
+        self.assertEqual(self.claude.stat().st_ino, directory_inode)
+        self.assertEqual(private.stat().st_ino, private_inode)
+        self.assertEqual((private / "local.txt").stat().st_ino, local_inode)
+        self.assertEqual((private / "local.txt").read_text(), "edited after first sync")
+        self.assertEqual((self.claude / "example").lstat().st_ino, original_link_inode)
+        self.assertTrue(unrelated.is_symlink())
+        self.assertEqual((self.claude.parent / "skills.before-sync/private/local.txt").read_bytes(), backup_bytes)
+
+    def test_directory_publication_restores_previous_if_second_rename_fails(self):
+        destination = self.root / "published"
+        destination.mkdir()
+        (destination / "old.txt").write_text("retain me")
+        stage = self.root / "stage"
+        stage.mkdir()
+        original = Path.rename
+        def rename(path, target):
+            if path == stage:
+                raise OSError("second rename failed")
+            return original(path, target)
+        with patch.object(Path, "rename", rename):
+            with self.assertRaisesRegex(OSError, "second rename failed"):
+                SYNC.publish_directory(stage, destination)
+        self.assertEqual((destination / "old.txt").read_text(), "retain me")
+
     def test_claude_whole_clone_link_becomes_per_skill_view_with_backup(self):
         shutil.rmtree(self.claude)
         self.claude.symlink_to(self.shared)
@@ -364,7 +400,7 @@ class SkillsTests(SkillsFixture):
         worktree = self.home / ".agents/worktrees/draft"
         self.git("-C", self.shared, "worktree", "add", "-b", "draft", worktree)
         (worktree / "example/SKILL.md").write_text("dirty draft")
-        with patch.dict(os.environ, self.env), patch.object(SYNC, "publish_claude", side_effect=OSError("disk full")):
+        with patch.dict(os.environ, self.env), patch.object(SYNC, "publish_directory", side_effect=OSError("disk full")):
             try:
                 SYNC.sync(self.home, self.workspace, self.overlay)
             except (OSError, subprocess.CalledProcessError):

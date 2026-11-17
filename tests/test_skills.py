@@ -131,7 +131,7 @@ class SkillsTests(SkillsFixture):
         ])
 
     def test_discovery_skips_repository_containers_for_either_overlay_name(self):
-        # The final folder decision changes one production constant, not the tests.
+        # Parameterize both folder names to exercise repository-clone detection.
         for folder in ("skills", ".skills"):
             with self.subTest(folder=folder):
                 root = self.workspace / folder

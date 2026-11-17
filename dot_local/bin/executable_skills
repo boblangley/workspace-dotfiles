@@ -13,7 +13,8 @@ import tempfile
 
 
 URL = "https://github.com/wyrd-company/skills.git"
-# Interim epic ruling; the operator's final folder-name decision gates merge.
+# Operator option A: .skills avoids a project repository named skills.
+# https://github.com/wyrd-company/skills/issues/27 (workspace overlay stays /skills).
 PROJECT_OVERLAY = ".skills"
 VIEW_MARKER = ".skills-sync-view"
 

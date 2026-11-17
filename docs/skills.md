@@ -7,6 +7,11 @@ the apply; run the command directly to get a nonzero status for automation.
 
 ## Source and published views
 
+The published view at `~/.agents/skills` is a generated, writable copy. Each
+sync replaces edits there without a warning. Make skill changes in worktrees of
+`~/.local/share/skills/base` or in workspace/project overlays; never edit the
+published view, including through Claude's links into it.
+
 | Path | Purpose |
 | --- | --- |
 | `~/.local/share/skills/base/` | Writable clone of [wyrd-company/skills](https://github.com/wyrd-company/skills), kept on clean `main`; make skill PRs from worktrees of this clone. |
@@ -40,11 +45,11 @@ The command passes absolute paths to the clone's Taskfile, in this order:
 
 Projects without `.skills/` contribute no arguments. A candidate containing
 `.git` (file or directory) or `<folder-name>.git` is reported on stderr and
-skipped as a repository clone. `main/` is a valid skill name. The project folder
-name is the command's single `PROJECT_OVERLAY` constant. Its interim value
-`.skills` awaits the operator's decision on
-[skills#27](https://github.com/wyrd-company/skills/issues/27); merge is held until
-that decision matches the constant.
+skipped as a repository clone. `main/` is a valid skill name. The operator chose
+option A in [skills#27](https://github.com/wyrd-company/skills/issues/27): project
+overlays use `.skills/` because `skills/` collides with a repository named
+`skills` in a project. The workspace overlay stays `/skills`. The project folder
+name is held in the command's single `PROJECT_OVERLAY` constant, `.skills`.
 
 Merge rules, validation and the build interface belong to the skills
 repository's [CONTRIBUTING.md](https://github.com/wyrd-company/skills/blob/main/CONTRIBUTING.md#building-overlays-the-interface-for-skills-sync).
@@ -85,6 +90,10 @@ Migration happens by applying this revision (`chezmoi update` after the merge);
 never install `skills` or run `skills sync` from a branch while the applied
 chezmoi source still declares the `~/.agents/skills` git-repo external. A rollback
 lasts only until the next apply.
+
+A plain `git revert` restores the old git-repo external, which cannot manage the
+published view because it has no `.git`; every apply then fails. Run the
+[documented rollback](#rollback) before applying any revert, or fix forward.
 
 The hook adopts the old real clone at `~/.agents/skills` as
 `~/.local/share/skills/base`, preserving all Git objects, branches and linked

@@ -19,3 +19,7 @@ Claude's `managedMcpServers` setting rejects header helpers, and its exclusive
 this connection in `/etc/codex/config.toml`, so that entry stays in Ansible.
 Apply both repositories with `ansible-sync`, or run `chezmoi apply ~/.claude.json`
 after the system helper is installed, then start a new Claude Code session.
+
+`skills sync` builds shared skills with workspace and project overlays and
+maintains the Claude Code, Codex and Pi views. It also runs after every chezmoi
+apply. See [Skills](docs/skills.md) for setup, migration, rollback and checks.

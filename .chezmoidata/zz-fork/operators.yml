@@ -1,0 +1,5 @@
+# Fork overlay: this workspace's operators, replacing upstream's list (docs/fork-overlay.md).
+operators:
+  - handle: boblangley
+    name: Bob Langley
+    github_pubkey: "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIM+dlxMMudB7lYe1kLMO71wQJJZrsAmvnkJKRGZDxyN2 ssh-operator-boblangley"

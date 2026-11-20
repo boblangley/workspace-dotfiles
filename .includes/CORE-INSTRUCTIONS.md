@@ -50,7 +50,7 @@ The installed skills are generally built around progressive disclosure and aroun
 
 You may reach for a skill and find it missing content. That is to be expected. Note the missing detail as an observation in memory.
 
-You may also read a skill and see that it conflicts. In general, if a skill conflicts with AGENTS.md/CLAUDE.md context files, issue descriptions, `docs/**`, or explicit instruction from the user, the skill loses. Note the observation in memory.
+You may also read a skill and see that it conflicts. In general, if a skill conflicts with repository or user AGENTS.md/CLAUDE.md context files, issue descriptions, `docs/**`, or explicit instruction from the user, the skill loses. Note the observation in memory.
 
 ## Installed Tools:
 

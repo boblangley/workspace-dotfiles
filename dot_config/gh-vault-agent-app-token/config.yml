@@ -1,4 +1,5 @@
 harnesses:
+  antigravity: wyrd-gemini[bot]   # ANTIGRAVITY_AGENT
   claude: wyrd-claude[bot]        # CLAUDECODE
   codex: wyrd-codex[bot]          # CODEX_THREAD_ID
   pi: wyrd-pi[bot]                # PI_CODING_AGENT
@@ -13,6 +14,9 @@ apps:
   wyrd-codex[bot]:
     app_id: 5573885
     transit_key: gh-app-wyrd-codex
+  wyrd-gemini[bot]:
+    app_id: 5849531
+    transit_key: gh-app-wyrd-gemini
   wyrd-pi[bot]:
     app_id: 5573912
     transit_key: gh-app-wyrd-pi

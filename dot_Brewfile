@@ -5,6 +5,7 @@ tap "dotenvx/brew", trusted: true
 tap "equinix-labs/otel-cli", trusted: true
 tap "thoughtbot/formulae", trusted: true
 tap "wyrd-company/tools", trusted: true
+tap "xo/xo", trusted: true
 
 brew "wyrd-company/tools/agent-svgtools"
 brew "awscli"
@@ -36,6 +37,7 @@ brew "wyrd-company/tools/seek-cli"
 brew "charmbracelet/tap/skate"
 brew "go-task"
 brew "wyrd-company/tools/toha"
+brew "xo/xo/usql"
 brew "uv"
 brew "vhs"
 brew "yq"

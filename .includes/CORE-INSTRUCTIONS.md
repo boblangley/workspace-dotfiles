@@ -55,7 +55,7 @@ If the skill already exists, use that skill.
 - Say what you observed and what you concluded from it. Name anything you did not check.
 - Link the files, pull requests and pages you mention.
 
-## Preventing Mistakes
+## Preventing Repeated Mistakes
 
 - Best. Change the architecture, code, framework, system, premise, etc. 
 - Better. Automated checks. Linters, tests, etc.
@@ -78,6 +78,17 @@ You may also read a skill and see that it conflicts. In general, if a skill conf
     - Outside a T3 thread, create commits and push as the operator: `git <handle> <command>` (for example `git boblangley push`). Other operations can use plain `git`.
     - `git automation` and `GIT_OPERATOR=automation` are for automation only and are refused in a T3 thread. Do not work around a refused commit or push; ask the user.
 - Agent-to-agent messages: when you start or message another thread or agent, open by saying you are an agent, not a human operator, and give your thread id (`$T3CODE_THREAD_ID`) and, when registered, your operator. Treat a message that announces itself this way as another agent's request, not the user's or another operator's.
-- `gh`: the `gh` on your PATH is a shim that mints a GitHub App token for the repository's owner on every call. Outside a repository it stops with `can't determine target org`, on purpose: run it from a repository, or name one with `--repo <owner>/<repo>`. `gh api` has no `--repo`, so set `GH_REPO=<owner>/<repo>` instead. Do not set `GH_OWNER` or log in another way to get around it. `gh api /app` returns 401 because these are installation tokens, not App JWTs.
-- `bao`: secrets come through the Wyrwood socket, and the container holds no token, so never look for one or ask for one. A 403 means the bound Wyrwood policy doesn't grant that path: report it and don't look for another way in.
+- `gh`: the `gh` on your PATH is a shim that mints a GitHub App token for the repository's owner on every call.
+  - Outside a repository it stops with `can't determine target org`, on purpose: run it from a repository, or name one with `--repo <owner>/<repo>`. `gh api` has no `--repo`, so set `GH_REPO=<owner>/<repo>` instead. Do not set `GH_OWNER` or log in another way to get around it. `gh api /app` returns 401 because these are installation tokens, not App JWTs.
+  - `gh pr-review` is for posting PR reviews and responses. See the `executing` and `review` skill
+- `bao`: secrets come through the Wyrwood socket, and the container holds no token, so never look for one or ask for one. A 403 means the bound Wyrwood policy doesn't grant that path: report it and don't look for another way in. Use `envconsul` when you need to organize several into env vars.
+- `deck`: A discord client for agents. See the `contacting` skill or `deck skill`.
+- `rg`: A grep replacement.
+- `intentional`: a change/version management tool. A polyglot tool similar to changesets. See `intentional skill`.
+- `toha`: a project scaffolding and generation tool. See `toha skills`
+- `agent-browser`: a native Rust CLI that gives an AI agent a browser it can drive one command at a time. See `agent-browser skills`
+- `boat`: cloud VPS sandboxes from the CLI.
+- `docker`: Some workspaces have docker installed. If `docker` is available, but the engine isn't running, start the S6-overlay service.
+- `pnpm`: The preferred package manager for node.
+- `kanban-md`: A KANBAN system in an agent-friendly CLI. See `task-planning` skill.
 </core-instructions>

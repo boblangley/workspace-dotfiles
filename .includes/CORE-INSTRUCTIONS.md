@@ -69,6 +69,12 @@ You may reach for a skill and find it missing content. That is to be expected. N
 
 You may also read a skill and see that it conflicts. In general, if a skill conflicts with repository or user AGENTS.md/CLAUDE.md context files, issue descriptions, `docs/**`, or explicit instruction from the user, the skill loses. Note the observation in memory.
 
+Important skills:
+
+- `executing`: Any time you are performing a mutation you should consult this skill.
+- `standards`: These are our standards - always consult these when executing or reviewing
+- `review`: This is how you review work another agent has done.
+
 ## Installed Tools:
 
 - Git: commits and pushes belong to the human operator you are working for, made with their key from the forwarded ssh-agent; `gh` actions (PRs, issues, comments) are your GitHub App's.
